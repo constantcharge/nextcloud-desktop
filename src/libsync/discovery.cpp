@@ -2407,6 +2407,20 @@ void ProcessDirectoryJob::startAsyncLocalQuery()
     QString localPath = _discoveryData->_localDir + _currentFolder._local;
     auto localJob = new DiscoverySingleLocalDirectoryJob(_discoveryData->_account, localPath, _discoveryData->_syncOptions._vfs.data(), _discoveryData->_fileSystemReliablePermissions);
 
+    LocalFileMetadataMap journalMetadata;
+    const auto pathU8 = _currentFolder._original.toUtf8();
+    if (!_discoveryData->_statedb->listFilesInPath(pathU8, [this, &journalMetadata, &pathU8](const SyncJournalFileRecord &record) {
+            auto name = pathU8.isEmpty() ? record._path : QString::fromUtf8(record._path.constData() + (pathU8.size() + 1));
+            if (record.isVirtualFile() && isVfsWithSuffix())
+                chopVirtualFileSuffix(name);
+            journalMetadata.insert(name, { record._modtime, record._fileSize, record._type });
+        })) {
+        delete localJob;
+        dbError();
+        return;
+    }
+    localJob->setJournalMetadata(std::move(journalMetadata));
+
     _discoveryData->_currentlyActiveJobs++;
     _pendingAsyncJobs++;
 

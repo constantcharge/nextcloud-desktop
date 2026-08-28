@@ -15,7 +15,9 @@
 #include <syncengine.h>
 #include <localdiscoverytracker.h>
 #include "discoveryphase.h"
+#include <QThread>
 #include <QThreadPool>
+#include <atomic>
 
 using namespace OCC;
 
@@ -169,6 +171,70 @@ private Q_SLOTS:
         seenFiles.sort();
         expectedFiles.sort();
         QCOMPARE(seenFiles, expectedFiles);
+    }
+
+    void testLocalDirectoryDiscoverySkipsLockProbesForUnchangedFiles()
+    {
+        QTemporaryDir tmp;
+        QVERIFY(tmp.isValid());
+
+        for (int i = 0; i < 50; ++i) {
+            QFile file(tmp.filePath(QStringLiteral("unchanged_%1.txt").arg(i)));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("data");
+        }
+
+        QFile changedFile(tmp.filePath(QStringLiteral("changed.txt")));
+        QVERIFY(changedFile.open(QIODevice::WriteOnly));
+        changedFile.write("changed");
+        changedFile.close();
+
+        QFile newFile(tmp.filePath(QStringLiteral("new.txt")));
+        QVERIFY(newFile.open(QIODevice::WriteOnly));
+        newFile.write("new");
+        newFile.close();
+
+        const auto initialJob = new DiscoverySingleLocalDirectoryJob({}, tmp.path(), nullptr, false);
+        QSignalSpy initialFinishedSpy(initialJob, &DiscoverySingleLocalDirectoryJob::finished);
+        QThreadPool::globalInstance()->start(initialJob);
+        QTRY_COMPARE_WITH_TIMEOUT(initialFinishedSpy.count(), 1, 5000);
+
+        LocalFileMetadataMap journalMetadata;
+        const auto initialResults = initialFinishedSpy.takeFirst().at(0).value<QVector<OCC::LocalInfo>>();
+        for (const auto &info : initialResults) {
+            if (info.name != QStringLiteral("new.txt")) {
+                journalMetadata.insert(info.name, { info.modtime, info.size, info.type });
+            }
+        }
+        journalMetadata[QStringLiteral("changed.txt")].size--;
+
+        std::atomic<int> probeCount{0};
+        std::atomic<QThread *> probeThread{nullptr};
+        const auto mainThread = QThread::currentThread();
+        const auto job = new DiscoverySingleLocalDirectoryJob({}, tmp.path(), nullptr, false);
+        job->setJournalMetadata(std::move(journalMetadata));
+        job->setIsFileLockedOverride([&probeCount, &probeThread](const QString &path) {
+            ++probeCount;
+            probeThread.store(QThread::currentThread());
+            return path.endsWith(QStringLiteral("changed.txt"));
+        });
+
+        QSignalSpy finishedSpy(job, &DiscoverySingleLocalDirectoryJob::finished);
+        QThreadPool::globalInstance()->start(job);
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 5000);
+
+        QCOMPARE(probeCount.load(), 2);
+        QVERIFY(probeThread.load() != nullptr);
+        QVERIFY(probeThread.load() != mainThread);
+
+        const auto results = finishedSpy.takeFirst().at(0).value<QVector<OCC::LocalInfo>>();
+        for (const auto &info : results) {
+            if (info.name == QStringLiteral("changed.txt")) {
+                QVERIFY(info.isLocked);
+            } else {
+                QVERIFY(!info.isLocked);
+            }
+        }
     }
 
 #ifdef Q_OS_WIN

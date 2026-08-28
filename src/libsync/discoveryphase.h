@@ -15,6 +15,7 @@
 
 #include <QObject>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QStringList>
 #include <csync.h>
 #include <QMap>
@@ -23,6 +24,7 @@
 #include <QWaitCondition>
 #include <QRunnable>
 #include <deque>
+#include <functional>
 
 class ExcludedFiles;
 
@@ -68,6 +70,15 @@ struct LocalInfo
     [[nodiscard]] bool isValid() const { return !name.isNull(); }
 };
 
+struct LocalFileMetadata
+{
+    time_t modtime = 0;
+    int64_t size = 0;
+    ItemType type = ItemTypeSkip;
+};
+
+using LocalFileMetadataMap = QHash<QString, LocalFileMetadata>;
+
 /**
  * @brief Run list on a local directory and process the results for Discovery
  *
@@ -84,6 +95,13 @@ public:
                                               QObject *parent = nullptr);
 
     void run() override;
+
+    // Metadata captured from the sync journal before the worker starts. A lock
+    // probe is only needed when the local entry is not known to be unchanged.
+    void setJournalMetadata(LocalFileMetadataMap journalMetadata);
+
+    // Used by focused discovery tests to observe which entries would be probed.
+    void setIsFileLockedOverride(std::function<bool(const QString &absoluteLocalPath)> isFileLockedOverride);
 Q_SIGNALS:
     void finished(QVector<OCC::LocalInfo> result);
     void finishedFatalError(QString errorString);
@@ -97,6 +115,8 @@ private:
     AccountPtr _account;
     OCC::Vfs* _vfs;
     bool _fileSystemReliablePermissions = false;
+    LocalFileMetadataMap _journalMetadata;
+    std::function<bool(const QString &absoluteLocalPath)> _isFileLockedOverride;
 public:
 };
 

@@ -343,6 +343,16 @@ DiscoverySingleLocalDirectoryJob::DiscoverySingleLocalDirectoryJob(const Account
     qRegisterMetaType<QVector<OCC::LocalInfo> >("QVector<OCC::LocalInfo>");
 }
 
+void DiscoverySingleLocalDirectoryJob::setJournalMetadata(LocalFileMetadataMap journalMetadata)
+{
+    _journalMetadata = std::move(journalMetadata);
+}
+
+void DiscoverySingleLocalDirectoryJob::setIsFileLockedOverride(std::function<bool(const QString &absoluteLocalPath)> isFileLockedOverride)
+{
+    _isFileLockedOverride = std::move(isFileLockedOverride);
+}
+
 // Use as QRunnable
 void DiscoverySingleLocalDirectoryJob::run() {
     QString localPath = _localPath;
@@ -405,10 +415,23 @@ void DiscoverySingleLocalDirectoryJob::run() {
         i.isPermissionsInvalid = dirent->isPermissionsInvalid;
         i.type = dirent->type;
 
-        // Access lock state on the worker thread so a blocking open cannot freeze the GUI #10464
-        if (!i.isSymLink && !i.isVirtualFile && !i.isDirectory) {
+        // Access lock state on the worker thread so a blocking open cannot freeze the GUI #10464.
+        // Opening every unchanged file also triggers Windows Defender's OnOpen scan (#10580),
+        // so only probe local entries that are new or changed since the last journal record.
+        const auto journalEntry = _journalMetadata.constFind(i.name);
+        const auto locallyChanged = journalEntry == _journalMetadata.cend()
+            || journalEntry->modtime != i.modtime
+            || journalEntry->size != i.size
+            || journalEntry->type != i.type;
+#ifdef Q_OS_WIN
+        const auto shouldProbeLock = true;
+#else
+        const auto shouldProbeLock = static_cast<bool>(_isFileLockedOverride);
+#endif
+        if (shouldProbeLock && locallyChanged && !i.isSymLink && !i.isVirtualFile && !i.isDirectory) {
             const QString absoluteLocalPath = localPath + QLatin1Char('/') + i.name;
-            i.isLocked = FileSystem::isFileLocked(absoluteLocalPath, FileSystem::LockMode::SharedRead);
+            i.isLocked = _isFileLockedOverride ? _isFileLockedOverride(absoluteLocalPath)
+                                                : FileSystem::isFileLocked(absoluteLocalPath, FileSystem::LockMode::SharedRead);
             qCDebug(lcDiscovery) << "File" << absoluteLocalPath << "isLocked" << i.isLocked;
         }
 
